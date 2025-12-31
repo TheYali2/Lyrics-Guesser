@@ -3,9 +3,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Search, Music2, Mic2, HelpCircle, RefreshCcw, Trophy, LogOut, User as UserIcon, SkipForward, PlayCircle, Disc, Calendar, ArrowLeft, Heart, XCircle, AlertTriangle, Share2, Timer, ListMusic } from 'lucide-react';
 import html2canvas from 'html2canvas';
 
-import { Artist, GameState, Difficulty, UserProfile } from './types';
+import { Artist, GameState, Difficulty, UserProfile, Track, Question } from './types';
 import { searchArtists } from './services/spotify';
-import { generateGameRound } from './services/gameLogic';
+import { generateGameRound, fetchArtistTracks } from './services/gameLogic';
 import { BlurTransition } from './components/BlurTransition';
 import { loginUser, getCurrentUser, logoutUser, updateUserStats, deleteUser } from './services/auth';
 import { ToastContainer, ToastMessage } from './components/Toast';
@@ -30,6 +30,10 @@ const App: React.FC = () => {
     skipsRemaining: MAX_SKIPS,
     skipsUsed: 0
   });
+
+  const [allTracks, setAllTracks] = useState<Track[]>([]);
+  const [usedTrackIds, setUsedTrackIds] = useState<string[]>([]);
+  const [nextQuestion, setNextQuestion] = useState<Question | null>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Artist[]>([]);
@@ -151,6 +155,15 @@ const App: React.FC = () => {
     setTimeLeft(duration);
   };
 
+  const preloadNextRound = useCallback(async (artistName: string, tracks: Track[], usedIds: string[]) => {
+    try {
+      const question = await generateGameRound(artistName, tracks, difficulty, usedIds);
+      setNextQuestion(question);
+    } catch (e) {
+      console.warn("Background preload failed, will retry on demand.");
+    }
+  }, [difficulty]);
+
   const startGame = async (artist: Artist) => {
     const totalRounds = getTotalRounds(difficulty);
 
@@ -167,8 +180,18 @@ const App: React.FC = () => {
       questions: []
     }));
 
+    setNextQuestion(null);
+    setUsedTrackIds([]);
+
     try {
-      const question = await generateGameRound(artist, difficulty);
+      const tracks = await fetchArtistTracks(artist.id);
+      setAllTracks(tracks);
+
+      const question = await generateGameRound(artist.name, tracks, difficulty, []);
+
+      const newUsedIds = [question.correctTrack.id];
+      setUsedTrackIds(newUsedIds);
+
       setGameState(prev => ({
         ...prev,
         questions: [question],
@@ -178,6 +201,9 @@ const App: React.FC = () => {
       setSelectedAnswer(null);
       setRoundResult(null);
       startRoundTimer();
+
+      preloadNextRound(artist.name, tracks, newUsedIds);
+
     } catch (error) {
       console.error(error);
       setGameState(prev => ({ ...prev, status: 'search' }));
@@ -203,22 +229,37 @@ const App: React.FC = () => {
 
     setGameState(prev => ({
       ...prev,
-      status: 'loading',
+      status: nextQuestion ? 'playing' : 'loading',
       skipsRemaining: prev.skipsRemaining - 1,
       skipsUsed: prev.skipsUsed + 1
     }));
 
+    if (!nextQuestion) setTimeLeft(0);
+
     try {
-      const nextQuestion = await generateGameRound(gameState.selectedArtist!, difficulty);
+      let nextQ = nextQuestion;
+
+      if (!nextQ) {
+        nextQ = await generateGameRound(gameState.selectedArtist!.name, allTracks, difficulty, usedTrackIds);
+      }
+
+      const newUsedIds = [...usedTrackIds, nextQ!.correctTrack.id];
+      setUsedTrackIds(newUsedIds);
+
       setGameState(prev => ({
         ...prev,
-        questions: [...prev.questions.slice(0, -1), nextQuestion],
+        questions: [...prev.questions.slice(0, -1), nextQ!],
         status: 'playing',
       }));
+
       setHintRevealed(false);
       setSelectedAnswer(null);
       setRoundResult(null);
       startRoundTimer();
+      setNextQuestion(null);
+
+      preloadNextRound(gameState.selectedArtist!.name, allTracks, newUsedIds);
+
     } catch (e) {
       addToast("Failed to skip. No more songs found.", 'error');
       setGameState(prev => ({ ...prev, status: 'playing' }));
@@ -270,26 +311,42 @@ const App: React.FC = () => {
         }
         setGameState(prev => ({ ...prev, status: 'game_over' }));
       } else {
-        setGameState(prev => ({ ...prev, status: 'loading', currentRound: prev.currentRound + 1 }));
-        try {
-          const nextQuestion = await generateGameRound(gameState.selectedArtist!, difficulty);
-          setGameState(prev => ({
-            ...prev,
-            questions: [...prev.questions, nextQuestion],
-            status: 'playing',
-          }));
-          setHintRevealed(false);
-          setSelectedAnswer(null);
-          setRoundResult(null);
-          startRoundTimer();
-        } catch (e) {
-          if (user && gameState.selectedArtist) {
-            updateUserStats(user.username, newScore, gameState.totalRounds, gameState.selectedArtist.name, difficulty);
-            const updatedUser = getCurrentUser();
-            if (updatedUser) setUser(updatedUser);
+
+        let nextQ = nextQuestion;
+
+        if (!nextQ) {
+          setGameState(prev => ({ ...prev, status: 'loading', currentRound: prev.currentRound + 1 }));
+          try {
+            nextQ = await generateGameRound(gameState.selectedArtist!.name, allTracks, difficulty, usedTrackIds);
+          } catch (e) {
+            if (user && gameState.selectedArtist) {
+              updateUserStats(user.username, newScore, gameState.totalRounds, gameState.selectedArtist.name, difficulty);
+              const updatedUser = getCurrentUser();
+              if (updatedUser) setUser(updatedUser);
+            }
+            setGameState(prev => ({ ...prev, status: 'game_over' }));
+            return;
           }
-          setGameState(prev => ({ ...prev, status: 'game_over' }));
+        } else {
+          setGameState(prev => ({ ...prev, currentRound: prev.currentRound + 1 }));
         }
+
+        const newUsedIds = [...usedTrackIds, nextQ!.correctTrack.id];
+        setUsedTrackIds(newUsedIds);
+
+        setGameState(prev => ({
+          ...prev,
+          questions: [...prev.questions, nextQ!],
+          status: 'playing',
+        }));
+
+        setHintRevealed(false);
+        setSelectedAnswer(null);
+        setRoundResult(null);
+        setNextQuestion(null);
+        startRoundTimer();
+
+        preloadNextRound(gameState.selectedArtist!.name, allTracks, newUsedIds);
       }
     }, 2500);
   }
@@ -311,6 +368,9 @@ const App: React.FC = () => {
     setHintRevealed(false);
     setSelectedAnswer(null);
     setRoundResult(null);
+    setNextQuestion(null);
+    setUsedTrackIds([]);
+    setAllTracks([]);
   };
 
   const handleShareProfile = async () => {

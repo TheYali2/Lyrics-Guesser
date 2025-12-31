@@ -21,72 +21,99 @@ const cleanLyrics = (rawLyrics: string): string[] => {
     );
 };
 
-export const generateGameRound = async (artist: Artist, difficulty: Difficulty): Promise<Question> => {
-  let allTracks = await getTopTracks(artist.id);
+export const fetchArtistTracks = async (artistId: string): Promise<Track[]> => {
+  return await getTopTracks(artistId);
+};
 
-  let totalOptions = 6;
+export const generateGameRound = async (
+  artistName: string,
+  allTracks: Track[],
+  difficulty: Difficulty,
+  usedTrackIds: string[] = []
+): Promise<Question> => {
+
+  let totalOptions = 4;
   if (difficulty === 'Easy') totalOptions = 3;
-  if (difficulty === 'Medium') totalOptions = 4;
+  if (difficulty === 'Hard') totalOptions = 6;
 
-  if (allTracks.length < totalOptions) {
-    if (allTracks.length < 2) throw new Error("Artist doesn't have enough tracks.");
-    totalOptions = allTracks.length;
+  let availableForQuestion = allTracks.filter(t => !usedTrackIds.includes(t.id));
+
+  if (availableForQuestion.length === 0) {
+    availableForQuestion = allTracks;
   }
 
-  allTracks = allTracks.sort(() => 0.5 - Math.random());
+  availableForQuestion = availableForQuestion.sort(() => 0.5 - Math.random());
 
-  let correctTrack: Track | null = null;
-  let lyricSnippet = "";
-  let hintSnippet = "";
-  let geniusUrl = "";
+  const BATCH_SIZE = 3;
+  let validQuestion: Partial<Question> | null = null;
+  let selectedTrack: Track | null = null;
 
-  for (const track of allTracks) {
-    const rawLyrics = await fetchLyrics(artist.name, track.name);
+  for (let i = 0; i < availableForQuestion.length; i += BATCH_SIZE) {
+    const batch = availableForQuestion.slice(i, i + BATCH_SIZE);
 
-    if (rawLyrics) {
-      const cleanLines = cleanLyrics(rawLyrics);
+    const results = await Promise.all(
+      batch.map(async (track) => {
+        const rawLyrics = await fetchLyrics(artistName, track.name);
+        if (!rawLyrics) return null;
 
-      if (cleanLines.length >= 6) {
+        const cleanLines = cleanLyrics(rawLyrics);
+        if (cleanLines.length < 6) return null;
 
         const maxIndex = cleanLines.length - 4;
         const startIndex = Math.floor(Math.random() * maxIndex);
-
-        lyricSnippet = cleanLines[startIndex];
+        const lyricSnippet = cleanLines[startIndex];
 
         let hintCount = 2;
         if (difficulty === 'Easy') hintCount = 3;
         if (difficulty === 'Hard') hintCount = 1;
 
-        hintSnippet = cleanLines.slice(startIndex + 1, startIndex + 1 + hintCount).join('\n');
+        const hintSnippet = cleanLines.slice(startIndex + 1, startIndex + 1 + hintCount).join('\n');
 
-        if (lyricSnippet && hintSnippet) {
-          correctTrack = track;
+        if (!lyricSnippet || !hintSnippet) return null;
 
-          const geniusData = await searchGeniusSong(artist.name, track.name);
-          if (geniusData) {
-            geniusUrl = geniusData.url;
-          }
+        let geniusUrl = undefined;
+        try {
+          const geniusData = await searchGeniusSong(artistName, track.name);
+          if (geniusData) geniusUrl = geniusData.url;
+        } catch (e) { }
 
-          break;
-        }
-      }
+        return {
+          track,
+          lyricSnippet,
+          hintSnippet,
+          geniusUrl
+        };
+      })
+    );
+
+    const match = results.find(r => r !== null);
+    if (match) {
+      selectedTrack = match.track;
+      validQuestion = {
+        artistName,
+        correctTrack: match.track,
+        lyricSnippet: match.lyricSnippet,
+        hintSnippet: match.hintSnippet,
+        geniusUrl: match.geniusUrl
+      };
+      break; // Found
     }
   }
 
-  if (!correctTrack) {
-    throw new Error("Could not find lyrics for any of the top tracks for this artist.");
+  if (!validQuestion || !selectedTrack) {
+    throw new Error("Could not find lyrics for any of the tracks.");
   }
 
   const numDistractors = Math.min(totalOptions - 1, allTracks.length - 1);
 
-  const distractors = getRandomTracks(allTracks, numDistractors, correctTrack.id);
+  const distractors = getRandomTracks(allTracks, numDistractors, selectedTrack.id);
 
   return {
-    artistName: artist.name,
-    correctTrack,
+    artistName,
+    correctTrack: selectedTrack,
     distractors: distractors.sort(() => 0.5 - Math.random()),
-    lyricSnippet,
-    hintSnippet,
-    geniusUrl
+    lyricSnippet: validQuestion.lyricSnippet!,
+    hintSnippet: validQuestion.hintSnippet!,
+    geniusUrl: validQuestion.geniusUrl
   };
 };

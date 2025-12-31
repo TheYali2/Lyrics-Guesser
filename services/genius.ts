@@ -45,12 +45,45 @@ export const searchGeniusSong = async (artist: string, track: string) => {
 
 export const fetchLyrics = async (artist: string, track: string): Promise<string | null> => {
   try {
-    const response = await fetch(`https://api.lyrics.ovh/v1/${encodeURIComponent(artist)}/${encodeURIComponent(track)}`);
+    const songData = await searchGeniusSong(artist, track);
+    if (!songData || !songData.url) return null;
+
+    const proxyUrl = 'https://corsproxy.io/?' + encodeURIComponent(songData.url);
+    const response = await fetch(proxyUrl);
     if (!response.ok) return null;
-    const data = await response.json();
-    return data.lyrics || null;
+    const html = await response.text();
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+
+    let lyrics = '';
+
+    const lyricContainers = doc.querySelectorAll('[data-lyrics-container="true"]');
+
+    if (lyricContainers.length > 0) {
+      lyricContainers.forEach(container => {
+        let content = container.innerHTML;
+        content = content.replace(/<br\s*\/?>/gi, '\n');
+
+        const temp = document.createElement('div');
+        temp.innerHTML = content;
+        lyrics += temp.textContent + '\n';
+      });
+    } else {
+      const oldContainer = doc.querySelector('.lyrics');
+      if (oldContainer) {
+        let content = oldContainer.innerHTML;
+        content = content.replace(/<br\s*\/?>/gi, '\n');
+        const temp = document.createElement('div');
+        temp.innerHTML = content;
+        lyrics = temp.textContent || '';
+      }
+    }
+
+    const cleaned = lyrics.trim();
+    return cleaned.length > 0 ? cleaned : null;
   } catch (error) {
-    console.warn("Lyrics fetch failed:", error);
+    console.warn("Genius Lyrics fetch failed:", error);
     return null;
   }
 };
